@@ -1,0 +1,12 @@
+data/
+models/*.pt
+models/*.pth
+runs/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.zip
+*.tar.gz
+.streamlit/secrets.toml
+yolo26n.pt
