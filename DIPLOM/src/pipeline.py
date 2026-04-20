@@ -542,6 +542,65 @@ class ALPRPipeline:
             return fallback
         return max(votes.items(), key=lambda kv: kv[1])[0]
 
+    def _merge_color_votes(self, prev: TrackedPlate | None, det: Detection) -> dict[str, float]:
+        votes = dict(prev.color_votes) if prev is not None else {}
+        if det.plate_color:
+            weight = 0.5 + det.plate_color_conf
+            if det.plate_color != "неизвестно":
+                weight += 0.5
+            votes[det.plate_color] = votes.get(det.plate_color, 0.0) + weight
+        return votes
+
+    def _best_vote_color(self, votes: dict[str, float], fallback: str) -> str:
+        if not votes:
+            return fallback
+        best_color, _ = max(votes.items(), key=lambda kv: kv[1])
+        if best_color == "неизвестно" and fallback and fallback != "неизвестно":
+            return fallback
+        return best_color
+
+    def _match_prev_track(self, det: Detection, prev_tracks: list[TrackedPlate]) -> TrackedPlate | None:
+        prev_match = None
+        prev_iou = 0.0
+        for tp in prev_tracks:
+            xyxy_prev = (tp.bbox[0], tp.bbox[1], tp.bbox[0] + tp.bbox[2], tp.bbox[1] + tp.bbox[3])
+            cur_iou = self._iou(det.bbox, xyxy_prev)
+            if cur_iou > prev_iou and cur_iou >= self.cfg.track_iou_match:
+                prev_iou = cur_iou
+                prev_match = tp
+        return prev_match
+
+    def _apply_temporal_votes(
+        self,
+        detections: list[Detection],
+        prev_tracks: list[TrackedPlate],
+        frame_rgb: np.ndarray | None = None,
+    ) -> list[TrackedPlate]:
+        new_tracks: list[TrackedPlate] = []
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            bbox_xywh = (x1, y1, x2 - x1, y2 - y1)
+            prev_match = self._match_prev_track(det, prev_tracks)
+            text_votes = self._merge_votes(prev_match, det)
+            color_votes = self._merge_color_votes(prev_match, det)
+            det.text = self._best_vote_text(text_votes, det.text)
+            det.plate_color = self._best_vote_color(color_votes, det.plate_color)
+
+            tracker = None
+            if frame_rgb is not None and self.cfg.use_tracker:
+                tracker = make_tracker(self.cfg.tracker_kind)
+                tracker.init(frame_rgb, bbox_xywh)
+
+            new_tracks.append(TrackedPlate(
+                bbox=bbox_xywh,
+                text=det.text,
+                plate_color=det.plate_color,
+                tracker=tracker,
+                text_votes=text_votes,
+                color_votes=color_votes,
+            ))
+        return new_tracks
+
     def _dedupe_detections(self, detections: list[Detection]) -> list[Detection]:
         kept: list[Detection] = []
         for det in sorted(detections, key=self._det_rank, reverse=True):
@@ -555,7 +614,9 @@ class ALPRPipeline:
     # ------------------------------------------------------------------
     def process_stream_frame(self, frame_rgb: np.ndarray) -> list[Detection]:
         if self.cfg.use_tracker and not has_tracker(self.cfg.tracker_kind):
-            return self.process_frame(frame_rgb)
+            detections = self.process_frame(frame_rgb)
+            self._tracked = self._apply_temporal_votes(detections, list(self._tracked))
+            return detections
         self._frame_idx += 1
         should_detect = (
             not self.cfg.use_tracker
@@ -565,24 +626,7 @@ class ALPRPipeline:
 
         if should_detect:
             detections = self.process_frame(frame_rgb)
-            prev_tracks = list(self._tracked)
-            self._tracked = []
-            for d in detections:
-                x1, y1, x2, y2 = d.bbox
-                bbox_xywh = (x1, y1, x2 - x1, y2 - y1)
-                prev_match = None
-                prev_iou = 0.0
-                for tp in prev_tracks:
-                    xyxy_prev = (tp.bbox[0], tp.bbox[1], tp.bbox[0] + tp.bbox[2], tp.bbox[1] + tp.bbox[3])
-                    cur_iou = self._iou(d.bbox, xyxy_prev)
-                    if cur_iou > prev_iou and cur_iou >= self.cfg.track_iou_match:
-                        prev_iou = cur_iou
-                        prev_match = tp
-                votes = self._merge_votes(prev_match, d)
-                d.text = self._best_vote_text(votes, d.text)
-                tr = make_tracker(self.cfg.tracker_kind)
-                tr.init(frame_rgb, bbox_xywh)
-                self._tracked.append(TrackedPlate(bbox=bbox_xywh, text=d.text, tracker=tr, text_votes=votes))
+            self._tracked = self._apply_temporal_votes(detections, list(self._tracked), frame_rgb=frame_rgb)
             return detections
 
         results: list[Detection] = []
@@ -602,6 +646,8 @@ class ALPRPipeline:
                 bbox=(x, y, x + w, y + h), conf=0.0,
                 crop=crop, rectified=None,
                 raw_text=tp.text, text=tp.text,
+                normalized_text=self._normalize_raw_plate_text(tp.text),
+                plate_color=tp.plate_color,
             ))
         self._tracked = still_alive
         return results

@@ -42,6 +42,7 @@ def has_tracker(kind: str = "csrt") -> bool:
 class TrackedPlate:
     bbox: tuple[int, int, int, int]      # (x, y, w, h)
     text: str = ""
+    plate_color: str = "неизвестно"
     tracker: cv2.Tracker | None = None
     text_votes: dict[str, float] = field(default_factory=dict)
     color_votes: dict[str, float] = field(default_factory=dict)

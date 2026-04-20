@@ -1,215 +1,377 @@
-# Дипломная работа: ALPR — распознавание номерных знаков (любой формат, любой шрифт)
+# ALPR Diploma Project
 
-Система детекции + распознавания автомобильных номеров в реальном времени.
-Читает **произвольный текст** на табличке: стандартные UA, дипломатические,
-спецтехнику, такси, военные, **именные/vanity**, иностранные.
+Система распознавания автомобильных номерных знаков в реальном времени для
+парковочной/дорожной камеры. Проект объединяет классические методы Computer
+Vision из курса и современные нейросетевые модели для детекции, выравнивания,
+улучшения и OCR номерных знаков.
 
-## Стек
+Проект подготовлен как `4. YOUR OWN PROJECT` для финального задания по курсу
+Computer Vision.
 
-| Компонент | Решение | Источник / связь с курсом |
-|-----------|---------|----------|
-| Детекция | YOLO26n (Ultralytics), fine-tune | lesson 18 (YOLO), ДЗ13–15 (CNN) |
+## Motivation
+
+Задача проекта: построить end-to-end ALPR-систему, которая умеет работать на
+реальной сцене с IP-камеры, где:
+
+- номера маленькие относительно всего кадра;
+- номера сняты под углом;
+- в одном кадре присутствует несколько автомобилей;
+- форматы номерных знаков различаются;
+- встречаются иностранные, нестандартные и именные таблички;
+- качество изображения ухудшается из-за расстояния, освещения и компрессии RTSP.
+
+Цель системы не только в том, чтобы найти номер, но и:
+
+- геометрически выровнять его;
+- улучшить качество кропа;
+- прочитать символы в правильном порядке;
+- определить тип/цвет фона номерной плашки в терминах предметной области.
+
+## Introduction
+
+В проекте комбинируются два класса подходов:
+
+- **Classical CV**
+  - color balance (Gray-world)
+  - sharpening (Unsharp Mask)
+  - corner detection (Harris)
+  - homography-based rectification
+  - thresholding (Otsu)
+  - morphology-based plate proposals
+- **Deep Learning**
+  - YOLO26n для детекции номерных знаков
+  - CRNN + CTC для OCR переменной длины
+
+Почему выбран именно такой стек:
+
+- detector должен работать на wide-shot сцене, где номера занимают малую часть кадра;
+- OCR должен читать не фиксированный формат, а строку произвольной длины;
+- classical preprocessing улучшает качество plate-crop до подачи в OCR;
+- RTSP-demo требует практического компромисса между recall, OCR quality и FPS.
+
+## Description
+
+### Pipeline
+
+Итоговый пайплайн:
+
+1. YOLO26n detector
+2. Sliced high-resolution inference для крупных RTSP-кадров
+3. Classical candidate recovery на основе фильтров курса
+4. Dedupe / merge кандидатов
+5. Harris + Homography rectification
+6. Quality restoration:
+   - Gray-world
+   - CLAHE
+   - Auto-gamma
+   - Bilateral denoise
+   - Unsharp mask
+7. OCR via CRNN+CTC
+8. Postprocess:
+   - латинизация символов
+   - сохранение порядка символов
+   - определение plate format
+   - определение цвета/типа фона плашки
+
+### Связь с курсом
+
+| Компонент | Реализация | Связь с курсом |
+|---|---|---|
+| Детекция | YOLO26n fine-tune | lesson 18, ДЗ13–15 |
 | Color balance | Gray-world | ДЗ2 |
-| Sharpening | Unsharp masking | ДЗ3 |
-| Corner detection | Harris | ДЗ6 |
+| Contrast recovery | CLAHE, gamma | lesson 2 |
+| Sharpening | Unsharp mask | ДЗ3 |
+| Denoising | Bilateral filter | lesson 3 |
+| Corners | Harris | ДЗ6 |
 | Rectification | Homography | ДЗ7 |
-| Binarization | Otsu | ДЗ8 |
-| **OCR (основной)** | **CRNN+CTC** (своя сеть) — variable-length, любой формат | ДЗ13/14/15 (CNN-backbone + training) |
-| OCR baseline | EasyOCR `['uk','en']` | — |
-| Tracking | KCF vs CSRT | ДЗ10 |
-| EDA | — | ДЗ12 |
-| CharCNN per-slot (архив) | Классификатор на 24 класса | ДЗ14 (см. 02c_archive) |
+| Thresholding | Otsu | ДЗ8 |
+| Tracking | KCF / CSRT API | ДЗ10 |
+| OCR | CRNN + CTC | ДЗ13–15 |
+| EDA | dataset analysis | ДЗ12 |
 
-**Почему CRNN+CTC, а не CharCNN:** CharCNN читает фиксированную длину/формат.
-CRNN+CTC читает строку произвольной длины — обязательное условие для
-именных номеров и нестандартных форматов.
+### Почему CRNN+CTC, а не fixed-format classifier
 
-## Поддерживаемые форматы номеров
+Fixed-slot classifier удобен только для жёсткого шаблона номера.
 
-Генератор синтетики (`scripts/generate_synthetic_ocr.py`) покрывает:
+В этом проекте OCR должен читать:
 
-| Тип | Пример | Фон / текст | Доля в синтетике |
-|---|---|---|---|
-| Стандартный UA | `АВ1234СР` | белый / чёрный | 35% |
-| Именной / vanity | `SANDY`, `BOSS-2024` | белый / чёрный | 25% |
-| Иностранные | `ABC-123-DE`, `123AB456` | белый / чёрный | 15% |
-| Дипломатический | `001CD123` | красный / белый | 8% |
-| Спецтехника | `С1234АВ` | синий / белый | 7% |
-| Военный | `ВТ12345` | зелёный / белый | 5% |
-| Такси | `АВ1234ТХ` | жёлтый / чёрный | 5% |
+- обычные номера;
+- номера разных стран;
+- нестандартные строки;
+- именные таблички;
+- plate strings разной длины.
 
-Рендер идёт 15+ системными шрифтами (Arial, Calibri, Consolas, Courier, Times,
-Verdana, Impact, Tahoma, Franklin, Georgia, Trebuchet…) + любыми `.ttf/.otf`
-из `data/fonts/`. Это и обеспечивает независимость от шрифта.
+Поэтому основным OCR выбран **CRNN + CTC**.
 
-## Железо / окружение
+## Supported Plate Types
 
-- Python 3.13
-- PyTorch 2.6 + CUDA 12.4
-- NVIDIA RTX 3050 Laptop (6 GB VRAM)
+Система проектируется под mixed-domain scenario, а не только под один UA-шаблон.
 
-## Структура
+Синтетический OCR-генератор покрывает:
 
-```
+| Тип | Пример | Фон |
+|---|---|---|
+| Standard | `AB1234CE` | белый |
+| Foreign | `ABC-123-DE` | белый |
+| Named / vanity | `SANDY`, `BOSS-2024` | белый |
+| Diplomatic | `001CD123` | красный |
+| Special | `C1234AB` | синий |
+| Military | `BT12345` | зелёный |
+| Taxi | `AB1234TX` | жёлтый |
+
+Система интерпретирует цвет не как произвольный RGB-оттенок, а как допустимый
+тип фона номерной плашки:
+
+- `белый`
+- `жёлтый`
+- `красный`
+- `синий`
+- `зелёный`
+- `неизвестно`
+
+## Repository Structure
+
+```text
 DIPLOM/
-├── config.yaml                     # пути, параметры OCR/CRNN, флаги
+├── app.py
+├── config.yaml
 ├── requirements.txt
-├── app.py                          # Streamlit-демо (3 вкладки, CRNN/EasyOCR переключатель)
-├── src/
-│   ├── preprocess.py               # Gray-world, Unsharp, Harris, Homography, Otsu
-│   ├── pipeline.py                 # ALPRPipeline (детекция → препроц → OCR → трекинг)
-│   ├── tracker.py                  # KCF vs CSRT
-│   ├── crnn.py                     # ⭐ CRNN + CTC (основной OCR)
-│   └── char_cnn.py                 # per-slot CNN (ДЗ14-baseline, архив)
-├── scripts/
-│   ├── convert_to_yolo.py          # AUTO.RIA VIA JSON → YOLO + ocr_{split}.csv
-│   ├── prepare_ocr_crops.py        # реальные кропы + GT-текст из ocr_*.csv
-│   └── generate_synthetic_ocr.py   # ⭐ все форматы + шрифты + аугментации
+├── README.md
 ├── notebooks/
-│   ├── 01_dataset_analysis.ipynb           # EDA
-│   ├── 02_train_detector.ipynb             # fine-tune YOLO26n
-│   ├── 02b_train_crnn_ocr.ipynb            # ⭐ обучение CRNN+CTC
-│   ├── 02c_train_char_cnn_archive.ipynb    # (архив) CharCNN baseline
-│   ├── 03_ocr_baseline.ipynb               # CRNN vs EasyOCR + ablation ДЗ
-│   └── 04_evaluation.ipynb                 # финальный отчёт
-├── data/
-│   ├── synthetic_ocr/              # сгенерированная синтетика (в .gitignore)
-│   ├── ocr_crops/                  # реальные кропы из AUTO.RIA
-│   ├── raw/                        # исходники (опц.)
-│   └── yolo/                       # ссылка на D:/Новая папка/alpr_data/yolo_plates
-└── models/                         # сохранённые веса (в .gitignore)
-    ├── yolo26n.pt                  # baseline
-    ├── yolo26_plate.pt             # fine-tuned (после 02_)
-    └── crnn_ocr.pt                 # обученная CRNN (после 02b_)
+│   ├── 01_dataset_analysis.ipynb
+│   ├── 02_train_detector.ipynb
+│   ├── 02b_train_crnn_ocr.ipynb
+│   ├── 02c_train_char_cnn_archive.ipynb
+│   ├── 03_ocr_baseline.ipynb
+│   └── 04_evaluation.ipynb
+├── scripts/
+│   ├── convert_to_yolo.py
+│   ├── prepare_ocr_crops.py
+│   ├── generate_synthetic_ocr.py
+│   ├── prepare_zenodo_ocr.py
+│   ├── prepare_combined_detector.py
+│   ├── train_detector.py
+│   ├── finetune_detector.py
+│   ├── train_crnn.py
+│   ├── evaluate_crnn.py
+│   ├── collect_scene_ocr.py
+│   └── test_rtsp.py
+├── src/
+│   ├── preprocess.py
+│   ├── pipeline.py
+│   ├── tracker.py
+│   ├── plate_color.py
+│   ├── plate_finder.py
+│   ├── plate_proposer_nn.py
+│   ├── crnn.py
+│   ├── char_cnn.py
+│   └── io_utils.py
+└── train_log.txt
 ```
 
-## Датасеты
+## Datasets
 
-Датасеты лежат в `D:/Новая папка/alpr_data/` — пути в [config.yaml](config.yaml).
+Основные источники данных:
 
-1. **[AUTO.RIA Numberplate Dataset](https://nomeroff.net.ua/datasets/autoriaNumberplateDataset-2026-01-13.zip)** (~10.6 GB, VIA-формат) — реальные UA-номера для детекции. При наличии текстовых меток в VIA JSON (`description`/`label`) используется и для CRNN.
-2. **Synthetic Ukrainian LP** ([Zenodo](https://zenodo.org/records/13342103), 236 MB) — 10 000 синтетических с character-level YOLO — для детектора.
-3. **`data/synthetic_ocr/`** (генерим сами) — 20 000+ разнообразных табличек с разметкой по строке. Главный источник для CRNN под «любой формат/шрифт».
+1. **AUTO.RIA Numberplate Dataset**
+   - real detection dataset
+   - VIA annotations
+   - используется для детектора и real OCR crops
+2. **Zenodo synthetic UA**
+   - synthetic plate-font dataset
+   - используется для OCR fine-tune
+3. **Self-generated synthetic OCR**
+   - `data/synthetic_ocr`
+   - форматы, цвета и шрифты
+4. **Scene-specific RTSP OCR dataset**
+   - `data/scene_ocr`
+   - автоматически собранные и отфильтрованные plate crops с камеры
 
-## Запуск с нуля
+## Installation
 
 ```bash
-# 1. venv + зависимости
-python -m venv .venv && .venv\Scripts\activate   # Windows
+python -m venv .venv
+.venv\Scripts\activate
+
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+```
 
-# 2. Сконвертировать AUTO.RIA в YOLO + OCR-разметку
+## Reproducibility
+
+### Detector
+
+```bash
 python scripts/convert_to_yolo.py \
-    --source D:/Новая папка/alpr_data/autoriaNumberplateDataset-2026-01-13 \
-    --dest   D:/Новая папка/alpr_data/yolo_plates \
-    --subset 4000
+  --source D:/Новая папка/alpr_data/autoriaNumberplateDataset-2026-01-13 \
+  --dest   D:/Новая папка/alpr_data/yolo_plates \
+  --subset 4000
 
-# 3. (опц., если VIA JSON содержит текст) Нарезать реальные OCR-кропы
-python scripts/prepare_ocr_crops.py \
-    --yolo-root   D:/Новая папка/alpr_data/yolo_plates \
-    --images-root D:/Новая папка/alpr_data/autoriaNumberplateDataset-2026-01-13 \
-    --out         data/ocr_crops
+python scripts/prepare_combined_detector.py
+python scripts/train_detector.py
+python scripts/finetune_detector.py --epochs 5 --batch 12 --imgsz 640 --workers 0 --name ua_plates_combined_v2
+```
 
-# 4. Сгенерировать синтетику (все форматы + шрифты)
+### OCR
+
+```bash
 python scripts/generate_synthetic_ocr.py --out data/synthetic_ocr --n 20000
+python scripts/prepare_zenodo_ocr.py
+python scripts/prepare_ocr_crops.py --rectify
 
-# 5. Прогнать ноутбуки по порядку
-jupyter lab notebooks/
-#   01_dataset_analysis.ipynb        — EDA
-#   02_train_detector.ipynb          — fine-tune YOLO26n
-#   02b_train_crnn_ocr.ipynb         — обучение CRNN+CTC на synthetic_ocr (+real)
-#   03_ocr_baseline.ipynb            — CRNN vs EasyOCR + ablation
-#   04_evaluation.ipynb              — финальный отчёт
+python scripts/train_crnn.py
+python scripts/train_crnn.py --resume --lr 1e-4 --real-boost 10 --epochs 15
+python scripts/train_crnn.py --resume --lr 5e-5 --epochs 6 --real-boost 10 --scene-boost 30
+```
 
-# 6. Streamlit-демо
+### RTSP scene-specific OCR collection
+
+```bash
+python scripts/collect_scene_ocr.py "rtsp://user:pass@host/path" \
+  --frames 180 \
+  --imgsz 1536 \
+  --conf 0.08 \
+  --weights models/yolo26_plate_combined.pt \
+  --out data/scene_ocr
+```
+
+### Demo
+
+```bash
 streamlit run app.py
 ```
 
-## RTSP (IP-камеры)
-
-Поддерживается через вкладку **📡 RTSP-камера** в Streamlit-демо и отдельный скрипт для быстрой проверки:
+CLI quick check:
 
 ```bash
-# проверить доступность потока + сохранить первый кадр
-python scripts/test_rtsp.py "rtsp://user:pass@host:port/path" --save-frame probe.jpg
-
-# прогнать 30 кадров через ALPR end-to-end
-python scripts/test_rtsp.py "rtsp://..." --frames 30
+python scripts/test_rtsp.py "rtsp://user:pass@host/path" --frames 30
 ```
 
-Бэкенд — OpenCV/FFmpeg с `CAP_PROP_BUFFERSIZE=1` для снижения задержки.
-На тестовой камере (2592×1520 @ 50fps) достигнуто ~12 FPS end-to-end без трекера.
+## Demo
 
-## Что демонстрирует диплом
+Демо-сценарий для защиты:
 
-1. **Fine-tuning современной архитектуры** — YOLO26n (lesson 18).
-2. **Классические CV-техники из курса** как препроцессинг — каждая из ДЗ2/3/6/7/8 попадает в итоговый пайплайн и валидируется в ablation.
-3. **Собственная нейросеть** — CRNN+CTC:
-   - Backbone по канонам ДЗ14 (Conv→BN→ReLU блоки, MaxPool)
-   - Sequence-часть (BiLSTM×2) — необходимое расширение под переменную длину
-   - CTC-loss — alignment-free обучение
-4. **Сравнение трекеров KCF vs CSRT** как в ДЗ10 — выбор оптимального для real-time.
-5. **Streamlit-демо** с переключателем CRNN↔EasyOCR, флагом strict_format и живой вебкамерой.
+1. открыть Streamlit или `test_rtsp.py`
+2. показать кадр с несколькими автомобилями
+3. показать, что detector видит несколько номеров в wide-shot сцене
+4. показать итоговый текст номера
+5. показать цвет/тип фона номерной плашки
 
-## Метрики (актуальные)
+Практический RTSP-scenario в текущем проекте:
 
-### Детектор YOLO26n (val AUTO.RIA, 335 изображений, 355 bbox)
+- камера: `2592×1520`
+- high-recall режим: `imgsz=1536`, `conf=0.08`
+- detector использует sliced inference
 
-| Метрика | Target | Actual |
-|---------|--------|--------|
-| mAP50 | ≥ 0.85 | **0.9748** ✓ |
-| mAP50-95 | — | 0.8486 |
-| Precision | — | 0.977 |
-| Recall | — | 0.941 |
+## Results
 
-### CRNN+CTC OCR
+### Detector
 
-**Synthetic val (2000 семплов, overall):** CER = **0.034**, exact-match = **84.6%** ✓
+AUTO.RIA validation:
 
-| Формат | n | mean CER | exact-match |
-|---|---|---|---|
-| taxi (жёлтый) | 100 | 0.000 | 100.0% |
-| diplomat (красный) | 145 | 0.001 | 99.3% |
-| standard UA | 715 | 0.001 | 99.2% |
-| military (зелёный) | 106 | 0.003 | 98.1% |
-| foreign | 289 | 0.003 | 98.3% |
-| spec (синий) | 140 | 0.005 | 97.9% |
-| **named / vanity** | 505 | 0.176 | 42.4% |
+| Metric | Value |
+|---|---|
+| mAP50 | **0.9748** |
+| mAP50-95 | **0.8486** |
+| Precision | **0.977** |
+| Recall | **0.941** |
 
-> Named — произвольный текст со случайным charset и длиной 2–8; 42% exact с CER 0.176 означает, что в среднем промахивается 1 символ из 5–8 — ожидаемый результат для действительно произвольных строк.
+Combined fine-tune (`AUTO.RIA + parking-angle dataset`):
 
-### CRNN на real AUTO.RIA (85/15 merge+resplit, 136 val семплов)
+| Metric | Value |
+|---|---|
+| mAP50 | **0.9851** |
+| mAP50-95 | **0.7057** |
+| Precision | **0.9783** |
+| Recall | **0.9462** |
 
-| Метрика | Значение |
+### OCR
+
+Synthetic validation:
+
+| Metric | Value |
+|---|---|
+| CER | **0.034** |
+| Exact-match | **84.6%** |
+
+Real AUTO.RIA validation:
+
+| Metric | Value |
 |---|---|
 | mean CER | **0.237** |
-| exact-match (strict) | **47.79%** |
+| exact-match | **47.79%** |
 
-**Breakdown по формату:**
+Scene-specific fine-tune:
 
-| region_name | n | mean CER | exact-match |
-|---|---|---|---|
-| unknown (без метки) | 41 | 0.076 | 85.4% |
-| eu-ua-2004 | 11 | 0.115 | 54.5% |
-| xx-unknown | 4 | 0.250 | 50.0% |
-| su (советский) | 13 | 0.275 | 46.1% |
-| eu-ua-2015 (новый UA) | 60 | 0.310 | 26.7% |
-| eu-ua-1995, eu | 6 | 0.77 | 0% |
+- scene dataset: 5 stable RTSP groups
+- corrected scene labels:
+  - `KA9537EC`
+  - `AI6524OA`
+  - `AA5104EK`
+  - `AX7405KH`
+  - `KA1959BI`
+- after scene fine-tune these strings stabilize significantly better than before
 
-**Что сработало (3 фактора):**
-1. Rectify (Harris+Homography, ДЗ6+7) в `prepare_ocr_crops.py --rectify` — кропы стали aspect-ratio-unified
-2. Padded preprocessing в CRNN (`min_w=128`) — достаточно timesteps для 8-символьной строки
-3. Честный 85/15 merge+resplit из объединённого пула AUTO.RIA train∪val (до этого val был из другого распределения)
+### Current RTSP Behavior
 
-**Pipeline обучения CRNN (4 прохода):**
+На чистом RTSP-потоке без внутренних наложений система сейчас выходит на:
 
-| Проход | Конфигурация | Best val CER |
-|---|---|---|
-| 1 | 20 эпох, synthetic_ocr + real, LR 3e-4 | 0.125 |
-| 2 | +Zenodo +real×10, 15 эпох fine-tune, LR 1e-4 | 0.086 |
-| 3 | +padded preprocess min_w=128, 10 эпох fine-tune | 0.082 |
-| 4 | +rectified real +85/15 merge-split +real×15, 15 эпох fine-tune | **0.036** |
+- до **7 plate detections** в кадре в high-recall режиме
+- стабильные correct plates:
+  - `AA5104EK`
+  - `AI6524OA`
+  - `KA9537EC`
+  - `KA1959BI`
+  - `AX7405KH`
+- дополнительные мелкие plate-like detections зависят от качества кадра
 
-### FPS (real-time на RTX 3050)
-Измеряется в `app.py` в live-режиме. Target ≥ 15 FPS.
+### Strengths
+
+- end-to-end система работает на реальной RTSP-камере;
+- использованы и classical CV, и deep learning;
+- OCR не ограничен одним фиксированным шаблоном;
+- есть scene-specific adaptation;
+- цвет интерпретируется как plate type, а не как raw RGB code.
+
+### Weaknesses
+
+- дальние номера всё ещё дают OCR-ошибки на 1 символ;
+- high-recall mode заметно снижает FPS;
+- часть scene labels требует ручной проверки, если используется pseudo-labeling;
+- нестандартные и очень маленькие plate crops остаются сложными.
+
+## Conclusions
+
+Проект показывает, что practical ALPR для реальной wide-shot сцены нельзя
+решить только одной моделью detector или только OCR.
+
+Лучший результат дал комбинированный подход:
+
+- fine-tuned detector
+- sliced inference на high-resolution кадре
+- геометрическое выравнивание номера
+- восстановление качества plate crop
+- CRNN+CTC OCR
+- scene-specific fine-tune
+
+Это соответствует задачам курса: применить classical CV и DL-компоненты в
+одной рабочей системе и оценить их вклад на реальных данных.
+
+## Future Work
+
+- temporal stabilization / voting even without OpenCV tracker
+- отдельный OCR fine-tune на дальних plate crops
+- beam search decoding вместо greedy CTC
+- lightweight tracking для роста FPS
+- more foreign/custom plate formats in OCR training
+- small super-resolution module for tiny plate crops
+
+## Project Status
+
+Проект находится в активной доработке.
+
+Текущий приоритет:
+
+1. улучшение OCR на дальних номерах;
+2. temporal stabilization текста между кадрами;
+3. финальная упаковка demo под защиту.
