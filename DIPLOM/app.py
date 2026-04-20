@@ -43,6 +43,9 @@ imgsz = st.sidebar.select_slider(
     "YOLO imgsz (больше → мелкие plate детектятся, медленнее)",
     options=[640, 960, 1280, 1536, 1920, 2048], value=1280,
 )
+min_plate_w = st.sidebar.slider("Min plate width, px", 20, 160, 40, 2)
+min_plate_h = st.sidebar.slider("Min plate height, px", 8, 60, 12, 1)
+min_plate_area = st.sidebar.slider("Min plate area, px²", 200, 5000, 600, 50)
 
 st.sidebar.subheader("Classical plate-finder (ДЗ2/3/4/6/7/8)")
 use_classical = st.sidebar.checkbox(
@@ -90,6 +93,7 @@ detect_every_n = st.sidebar.slider("YOLO раз в N кадров", 1, 15, 5)
 @st.cache_resource
 def load_pipeline(
     conf: float, imgsz: int, backend: str, strict: bool,
+    min_w: int, min_h: int, min_area: int,
     use_classical: bool, cls_backend: str, cls_min_ocr: float,
     use_gw: bool, use_clahe_: bool, use_gamma: bool, use_sharp: bool,
     use_denoise_: bool, use_rect: bool, use_otsu: bool,
@@ -97,6 +101,7 @@ def load_pipeline(
 ) -> ALPRPipeline:
     cfg = PipelineConfig(
         conf=conf, imgsz=imgsz,
+        final_min_w=min_w, final_min_h=min_h, final_min_area=min_area,
         ocr_backend=backend, strict_format=strict,
         use_classical_finder=use_classical, classical_backend=cls_backend,
         classical_min_ocr_conf=cls_min_ocr,
@@ -109,7 +114,7 @@ def load_pipeline(
 
 
 pipeline = load_pipeline(
-    conf, imgsz, ocr_backend, strict_format,
+    conf, imgsz, ocr_backend, strict_format, min_plate_w, min_plate_h, min_plate_area,
     use_classical, classical_backend, cls_min_ocr,
     use_gray_world, use_clahe, use_auto_gamma, use_unsharp,
     use_denoise, use_rectify, use_otsu,
@@ -117,6 +122,9 @@ pipeline = load_pipeline(
 )
 pipeline.cfg.conf = conf
 pipeline.cfg.imgsz = imgsz
+pipeline.cfg.final_min_w = min_plate_w
+pipeline.cfg.final_min_h = min_plate_h
+pipeline.cfg.final_min_area = min_plate_area
 pipeline.cfg.ocr_backend = ocr_backend
 pipeline.cfg.strict_format = strict_format
 pipeline.cfg.use_classical_finder = use_classical

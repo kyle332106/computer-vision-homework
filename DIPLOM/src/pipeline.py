@@ -82,6 +82,9 @@ class PipelineConfig:
     classical_min_len: int = 5
     final_min_aspect: float = 1.6
     final_max_aspect: float = 8.0
+    final_min_w: int = 40
+    final_min_h: int = 12
+    final_min_area: int = 600
     dedupe_iou: float = 0.35
 
     # OCR
@@ -580,6 +583,9 @@ class ALPRPipeline:
                 continue
             w = max(1, x2 - x1)
             h = max(1, y2 - y1)
+            area = w * h
+            if w < self.cfg.final_min_w or h < self.cfg.final_min_h or area < self.cfg.final_min_area:
+                continue
             aspect = w / h
             if not (self.cfg.final_min_aspect <= aspect <= self.cfg.final_max_aspect):
                 continue
