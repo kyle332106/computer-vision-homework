@@ -197,6 +197,73 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
+## Quick Start
+
+Если веса уже обучены и лежат в `models/`, самый короткий путь получить результат:
+
+### 1. Streamlit demo
+
+```bash
+cd DIPLOM
+streamlit run app.py
+```
+
+Что делать дальше:
+
+1. открыть вкладку `RTSP-камера`
+2. вставить RTSP URL
+3. нажать `Start RTSP`
+4. увидеть bbox, текст номера, цвет плашки и FPS
+
+### 2. CLI demo на RTSP
+
+```bash
+cd DIPLOM
+python scripts/test_rtsp.py "rtsp://user:pass@host/path" ^
+  --frames 30 ^
+  --imgsz 1536 ^
+  --conf 0.08 ^
+  --weights models/yolo26_plate_combined.pt ^
+  --classical-backend cpu ^
+  --classical-ocr-thr 0.8
+```
+
+### 3. CLI demo на одном кадре
+
+```bash
+cd DIPLOM
+python scripts/test_rtsp.py "rtsp://user:pass@host/path" --save-frame runs/eval/rtsp_probe.jpg
+```
+
+## Expected Output
+
+После запуска пользователь должен получить:
+
+- изображение или поток с найденными номерными знаками;
+- текст номера в правильном порядке;
+- цвет/тип номерной плашки человеческим названием:
+  - `белый`
+  - `жёлтый`
+  - `красный`
+  - `синий`
+  - `зелёный`
+  - `неизвестно`
+- для Streamlit:
+  - bbox на кадре
+  - plate text
+  - plate color
+  - format
+  - FPS
+- для CLI:
+  - строки вида `frame N  plates=K  [TEXT [цвет], ...]`
+
+Ожидаемые артефакты после полного обучения:
+
+- `models/yolo26_plate_combined.pt`
+- `models/crnn_ocr.pt`
+- `runs/detect/...` с логами обучения
+- `runs/eval/...` с проверочными изображениями и JSON-отчётами
+
 ## Reproducibility
 
 ### Detector
@@ -262,6 +329,77 @@ python scripts/test_rtsp.py "rtsp://user:pass@host/path" --frames 30
 - камера: `2592×1520`
 - high-recall режим: `imgsz=1536`, `conf=0.08`
 - detector использует sliced inference
+
+## Real Run Examples
+
+Ниже приведены реальные фрагменты запусков, полученные в текущем проекте.
+
+### Example 1. Detector training result
+
+Combined fine-tune detector:
+
+```text
+=== Метрики (combined val) ===
+mAP50    : 0.9851
+mAP50-95 : 0.7057
+Precision: 0.9783
+Recall   : 0.9462
+```
+
+Это означает, что detector уверенно находит номерные знаки и после fine-tune
+лучше обобщается на parking-angle scene.
+
+### Example 2. OCR training result
+
+Synthetic OCR validation:
+
+```text
+CER         : 0.034
+Exact-match : 84.6%
+```
+
+Real AUTO.RIA validation:
+
+```text
+mean CER    : 0.237
+exact-match : 47.79%
+```
+
+Scene-specific OCR fine-tune заметно улучшил стабильность строк именно на
+текущей RTSP-камере.
+
+### Example 3. RTSP run with stable recognized plates
+
+Реальный прогон:
+
+```text
+[rtsp] resolution=2592x1520  declared_fps=50.0
+[alpr] OCR backend = crnn  imgsz=1536  conf=0.08
+  frame   0  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
+  frame   1  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
+  frame   2  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
+```
+
+В этом режиме стабильно читаются реальные plate strings:
+
+- `KA9537EC`
+- `AI6524OA`
+- `AA5104EK`
+- `KA1959BI`
+
+Один дальний номер всё ещё остаётся сложным и иногда читается неполно.
+
+### Example 4. High-recall RTSP result
+
+При более агрессивной детекции система видит до 7 plate detections в кадре:
+
+```text
+frame 0: 7 plates
+[KA9537EC, AIT6524OA, KA1959BI, AA5104EK, AX7405KH, AI3246OE, A771AI]
+```
+
+Этот режим полезен для демонстрации recall detector, но даёт больше OCR-шума и
+хуже подходит как финальный production-like output.
 
 ## Results
 
