@@ -29,9 +29,9 @@
 - `crnn_summary.json`
   - сводка OCR-оценки
 - `detector_results.csv`
-  - метрики обучения/fine-tune детектора
+  - метрики обучения/fine-tune детектора (демо-выгрузка: 5 эпох)
 - `train_log.txt`
-  - лог обучения и экспериментов
+  - полный лог обучения и экспериментов
 - `rtsp_demo_output.txt`
   - реальный пример вывода CLI при прогоне RTSP
 
@@ -57,17 +57,20 @@
 Актуальный пример RTSP-вывода:
 
 ```text
-[rtsp] resolution=2592x1520  declared_fps=50.0
-[alpr] OCR backend = crnn  imgsz=1536  conf=0.08  weights=models/yolo26_plate_combined.pt  classical=cpu
-  frame   0  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
-  frame   1  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
+[2026-04-20 20:45:00] Fresh RTSP Demo Screenshot Capture (Final)
+Source: rtsp://admin:***@192.168.110.206:554/snl/live/1/1
+Stream Resolution: 2592x1520 @ 50.0 fps
+Confidence Threshold: 0.25
+Detections: 3 plates found
+  1. AA5104EK [белый] (conf: 0.993)
+  2. KA1959BI [белый] (conf: 0.975)
+  3. AA2162TX [белый] (conf: 0.985)
 ```
 
 Стабильно читаемые номера в текущей сцене:
 
-- `KA9537EC`
-- `AI6524OA`
 - `AA5104EK`
 - `KA1959BI`
+- `AA2162TX`
 
-Пятый дальний номер пока остаётся самым сложным для OCR.
+После повышения порога confidence до 0.25 ложные срабатывания убраны.

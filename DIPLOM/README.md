@@ -155,6 +155,8 @@ DIPLOM/
 │   ├── train_crnn.py
 │   ├── evaluate_crnn.py
 │   ├── collect_scene_ocr.py
+│   ├── process_plates.py
+│   ├── multi_rtsp_fast.py
 │   └── test_rtsp.py
 ├── src/
 │   ├── preprocess.py
@@ -165,6 +167,7 @@ DIPLOM/
 │   ├── plate_proposer_nn.py
 │   ├── crnn.py
 │   ├── char_cnn.py
+│   ├── source_manager.py
 │   └── io_utils.py
 └── train_log.txt
 ```
@@ -201,6 +204,13 @@ pip install -r requirements.txt
 
 Если веса уже обучены и лежат в `models/`, самый короткий путь получить результат:
 
+### Поддерживаемые входные источники
+
+- фото (upload в Streamlit)
+- видеофайл (upload в Streamlit)
+- RTSP-ссылка
+- веб-камера
+
 ### 1. Streamlit demo
 
 ```bash
@@ -222,7 +232,7 @@ cd DIPLOM
 python scripts/test_rtsp.py "rtsp://user:pass@host/path" ^
   --frames 30 ^
   --imgsz 1536 ^
-  --conf 0.08 ^
+  --conf 0.25 ^
   --weights models/yolo26_plate_combined.pt ^
   --classical-backend cpu ^
   --classical-ocr-thr 0.8
@@ -234,6 +244,28 @@ python scripts/test_rtsp.py "rtsp://user:pass@host/path" ^
 cd DIPLOM
 python scripts/test_rtsp.py "rtsp://user:pass@host/path" --save-frame runs/eval/rtsp_probe.jpg
 ```
+
+### 4. Multi-RTSP ultra-fast (10+ FPS target, no queue)
+
+Для нескольких RTSP потоков с минимальной задержкой:
+
+```bash
+cd DIPLOM
+python scripts/multi_rtsp_fast.py ^
+  --url "rtsp://user:pass@cam1/path" ^
+  --url "rtsp://user:pass@cam2/path" ^
+  --mode detect ^
+  --imgsz 640 ^
+  --conf 0.35 ^
+  --target-fps 10
+```
+
+Принцип работы этого режима:
+
+- без очереди кадров (latest-frame only);
+- старые кадры отбрасываются;
+- каждый поток обрабатывается в своём thread;
+- `--mode detect` — самый быстрый режим для цели 10+ FPS.
 
 ## Expected Output
 
@@ -327,7 +359,7 @@ python scripts/test_rtsp.py "rtsp://user:pass@host/path" --frames 30
 Практический RTSP-scenario в текущем проекте:
 
 - камера: `2592×1520`
-- high-recall режим: `imgsz=1536`, `conf=0.08`
+- production-like режим: `imgsz=1536`, `conf=0.25`
 - detector использует sliced inference
 
 ## Real Run Examples
@@ -374,32 +406,17 @@ Scene-specific OCR fine-tune заметно улучшил стабильнос�
 
 ```text
 [rtsp] resolution=2592x1520  declared_fps=50.0
-[alpr] OCR backend = crnn  imgsz=1536  conf=0.08
-  frame   0  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
-  frame   1  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
-  frame   2  plates=5  [KA9537EC [белый], AI6524OA [белый], AA5104EK [белый], KA1959BI [белый], A504E [белый]]
+[alpr] OCR backend = crnn  imgsz=1536  conf=0.25
+  frame   0  plates=3  [AA5104EK [белый], KA1959BI [белый], AA2162TX [белый]]
 ```
 
 В этом режиме стабильно читаются реальные plate strings:
 
-- `KA9537EC`
-- `AI6524OA`
 - `AA5104EK`
 - `KA1959BI`
+- `AA2162TX`
 
-Один дальний номер всё ещё остаётся сложным и иногда читается неполно.
-
-### Example 4. High-recall RTSP result
-
-При более агрессивной детекции система видит до 7 plate detections в кадре:
-
-```text
-frame 0: 7 plates
-[KA9537EC, AIT6524OA, KA1959BI, AA5104EK, AX7405KH, AI3246OE, A771AI]
-```
-
-Этот режим полезен для демонстрации recall detector, но даёт больше OCR-шума и
-хуже подходит как финальный production-like output.
+После повышения порога confidence до 0.25 ложные срабатывания существенно снижены.
 
 ## Results
 
@@ -441,27 +458,23 @@ Real AUTO.RIA validation:
 
 Scene-specific fine-tune:
 
-- scene dataset: 5 stable RTSP groups
+- scene dataset: 3 stable RTSP groups
 - corrected scene labels:
-  - `KA9537EC`
-  - `AI6524OA`
   - `AA5104EK`
-  - `AX7405KH`
   - `KA1959BI`
+  - `AA2162TX`
 - after scene fine-tune these strings stabilize significantly better than before
 
 ### Current RTSP Behavior
 
 На чистом RTSP-потоке без внутренних наложений система сейчас выходит на:
 
-- до **7 plate detections** в кадре в high-recall режиме
+- **3 plate detections** в кадре в production-like режиме
 - стабильные correct plates:
   - `AA5104EK`
-  - `AI6524OA`
-  - `KA9537EC`
   - `KA1959BI`
-  - `AX7405KH`
-- дополнительные мелкие plate-like detections зависят от качества кадра
+  - `AA2162TX`
+- дополнительные мелкие plate-like detections существенно снижены порогом `conf=0.25`
 
 ### Strengths
 

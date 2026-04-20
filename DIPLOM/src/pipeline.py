@@ -86,6 +86,7 @@ class PipelineConfig:
     final_min_h: int = 12
     final_min_area: int = 600
     dedupe_iou: float = 0.35
+    min_plate_distance: int = 150  # мин. горизонтальное расстояние между номерами (px)
 
     # OCR
     ocr_backend: OcrBackend = "crnn"
@@ -776,11 +777,32 @@ class ALPRPipeline:
         return new_tracks
 
     def _dedupe_detections(self, detections: list[Detection]) -> list[Detection]:
+        """Дедупликация: удаляет пересекающиеся или слишком близкие детекции."""
         kept: list[Detection] = []
         for det in sorted(detections, key=self._det_rank, reverse=True):
+            # Проверка IOU пересечения
             if any(self._iou(det.bbox, prev.bbox) >= self.cfg.dedupe_iou for prev in kept):
                 continue
-            kept.append(det)
+            
+            # Проверка горизонтального расстояния (на одной машине не может быть два номера рядом)
+            x1, _, x2, _ = det.bbox
+            det_center_x = (x1 + x2) / 2
+            det_width = x2 - x1
+            
+            too_close = False
+            for prev in kept:
+                px1, _, px2, _ = prev.bbox
+                prev_center_x = (px1 + px2) / 2
+                
+                # Если центры номеров ближе, чем ширина номера + буфер — они на одной машине
+                horizontal_dist = abs(det_center_x - prev_center_x)
+                if horizontal_dist < self.cfg.min_plate_distance:
+                    too_close = True
+                    break
+            
+            if not too_close:
+                kept.append(det)
+        
         return kept
 
     # ------------------------------------------------------------------
@@ -848,11 +870,38 @@ def draw_detections(frame_rgb: np.ndarray, detections: list[Detection]) -> np.nd
         x1, y1, x2, y2 = d.bbox
         color = SOURCE_COLORS.get(d.source, (0, 255, 0))
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-        label = d.text or "?"
+        
+        # Build label: only text (skip empty/uncertain results)
+        if not d.text or d.text.strip() == "?":
+            continue  # Skip detections without valid text
+        
+        label = d.text.upper()
+        
+        # Optional: add confidence and color info on separate line
+        info = f"conf:{d.ocr_conf:.2f}"
         if getattr(d, "plate_color", "") and d.plate_color != "неизвестно":
-            label = f"{label} · {d.plate_color}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        cv2.rectangle(out, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-        cv2.putText(out, label, (x1 + 2, y1 - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+            color_short = d.plate_color[:2]  # "бе" for "белый", "си" for "синий"
+            info = f"{info} {color_short}"
+        
+        # Draw text: main label
+        font = cv2.FONT_HERSHEY_DUPLEX  # Clearer, more readable
+        font_scale = 0.8
+        thickness = 2
+        text_color = (255, 255, 255)  # White text
+        bg_color = color
+        
+        (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+        pad = 3
+        
+        # Background rectangle for main label
+        cv2.rectangle(out, (x1 - 1, y1 - th - 2*pad - 2), 
+                     (x1 + tw + 2*pad, y1 + pad), bg_color, -1)
+        # Border for contrast
+        cv2.rectangle(out, (x1 - 1, y1 - th - 2*pad - 2), 
+                     (x1 + tw + 2*pad, y1 + pad), (0, 0, 0), 1)
+        
+        # Draw text
+        cv2.putText(out, label, (x1 + pad, y1 - pad),
+                   font, font_scale, text_color, thickness)
+        
     return out
