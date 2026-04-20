@@ -12,6 +12,7 @@ postprocess может работать в двух режимах:
 
 from __future__ import annotations
 
+import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,15 @@ class PipelineConfig:
     min_letters_in_text: int = 2
     min_digits_in_text: int = 2
     track_iou_match: float = 0.30
+    temporal_consensus_min_weight: float = 4.0
+    temporal_consensus_min_share: float = 0.55
+    ocr_tta: bool = False
+    ocr_tta_min_conf: float = 0.985
+    ocr_tta_small_w: int = 120
+    ocr_tta_small_h: int = 32
+    use_scene_lexicon: bool = True
+    scene_lexicon_dir: str = "data/scene_ocr"
+    scene_lexicon_min_similarity: float = 0.7
 
     # Препроцессинг-флаги (управление из Streamlit)
     use_gray_world: bool = True
@@ -132,6 +142,7 @@ class ALPRPipeline:
         self._reader = None                 # EasyOCR
         self._crnn = None                   # CRNN nn.Module
         self._crnn_device = None
+        self._scene_lexicon = None
         self._proposer_nn = None            # GPU plate-proposer (lesson_14 style)
         self._tracked: list[TrackedPlate] = []
         self._frame_idx = 0
@@ -197,6 +208,23 @@ class ALPRPipeline:
             self._crnn = model
             self._crnn_device = device
         return self._crnn
+
+    @property
+    def scene_lexicon(self) -> set[str]:
+        if self._scene_lexicon is None:
+            items: set[str] = set()
+            root = Path(self.cfg.scene_lexicon_dir)
+            for name in ("labels_train.csv", "labels_val.csv"):
+                csv_path = root / name
+                if not csv_path.exists():
+                    continue
+                with open(csv_path, encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        text = self._normalize_raw_plate_text(row.get("text", ""))
+                        if len(text) >= 5:
+                            items.add(text)
+            self._scene_lexicon = items
+        return self._scene_lexicon
 
     # ------------------------------------------------------------------
     # Stage 1: детекция
@@ -321,6 +349,88 @@ class ALPRPipeline:
             avg_conf = float(log_probs.exp().max(dim=2).values.mean().item())
         text = decode_greedy(log_probs)[0]
         return text, avg_conf
+
+    def _ocr_score(self, text: str, conf: float) -> float:
+        cleaned = self._cleanup_plate_text(text)
+        compact = re.sub(r"[\s-]+", "", cleaned)
+        score = conf
+        if self._looks_like_plate_text(cleaned):
+            score += 0.08
+        if 6 <= len(compact) <= 10:
+            score += 0.04
+        if sum(ch.isalpha() for ch in compact) >= 2 and sum(ch.isdigit() for ch in compact) >= 2:
+            score += 0.04
+        if cleaned == self.postprocess(cleaned):
+            score += 0.02
+        return score
+
+    def _levenshtein(self, a: str, b: str) -> int:
+        if len(a) < len(b):
+            a, b = b, a
+        if not b:
+            return len(a)
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i] + [0] * len(b)
+            for j, cb in enumerate(b, 1):
+                cur[j] = min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb))
+            prev = cur
+        return prev[-1]
+
+    def _scene_lexicon_match(self, text: str) -> str:
+        if not self.cfg.use_scene_lexicon:
+            return ""
+        query = self._normalize_raw_plate_text(text)
+        lexicon = self.scene_lexicon
+        if not query or not lexicon:
+            return ""
+        if query in lexicon:
+            return query
+
+        best_text = ""
+        best_sim = 0.0
+        for candidate in lexicon:
+            if abs(len(candidate) - len(query)) > 2:
+                continue
+            dist = self._levenshtein(query, candidate)
+            sim = 1.0 - dist / max(len(candidate), len(query), 1)
+            if sim > best_sim:
+                best_sim = sim
+                best_text = candidate
+        if best_sim >= self.cfg.scene_lexicon_min_similarity:
+            return best_text
+        return ""
+
+    def _recognize_crnn_tta(self, base_img_rgb: np.ndarray, original_crop_rgb: np.ndarray) -> tuple[str, float]:
+        candidates: list[tuple[str, float]] = []
+
+        def _add(img: np.ndarray) -> None:
+            text, conf = self._recognize_crnn_with_conf(img)
+            if text:
+                candidates.append((text, conf))
+
+        _add(base_img_rgb)
+
+        up2 = cv2.resize(base_img_rgb, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        _add(up2)
+
+        otsu_img = preprocess.prep_for_ocr(
+            original_crop_rgb,
+            use_gray_world=self.cfg.use_gray_world,
+            use_clahe=self.cfg.use_clahe,
+            use_auto_gamma=self.cfg.use_auto_gamma,
+            use_unsharp=self.cfg.use_unsharp,
+            use_denoise=self.cfg.use_denoise,
+            use_rectify=self.cfg.use_rectify,
+            use_otsu=True,
+        )
+        _add(otsu_img)
+        _add(cv2.resize(otsu_img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC))
+
+        if not candidates:
+            return "", 0.0
+        best_text, best_conf = max(candidates, key=lambda item: self._ocr_score(item[0], item[1]))
+        return best_text, best_conf
 
     def postprocess(self, text: str) -> str:
         text = text.upper()
@@ -481,11 +591,23 @@ class ALPRPipeline:
             color_info, color_conf = classify_plate_color_info(color_crop)
             if self.cfg.ocr_backend == "crnn":
                 raw, ocr_conf = self._recognize_crnn_with_conf(rectified)
+                h0, w0 = rectified.shape[:2]
+                if (
+                    self.cfg.ocr_tta and
+                    (ocr_conf < self.cfg.ocr_tta_min_conf or w0 <= self.cfg.ocr_tta_small_w or h0 <= self.cfg.ocr_tta_small_h)
+                ):
+                    raw_tta, conf_tta = self._recognize_crnn_tta(rectified, crop)
+                    if self._ocr_score(raw_tta, conf_tta) > self._ocr_score(raw, ocr_conf):
+                        raw, ocr_conf = raw_tta, conf_tta
             else:
                 raw = self._recognize_easyocr(rectified)
                 ocr_conf = 1.0 if raw else 0.0
             text = self.postprocess(raw)
             normalized_text = self._normalize_raw_plate_text(text)
+            scene_match = self._scene_lexicon_match(normalized_text)
+            if scene_match:
+                text = scene_match
+                normalized_text = scene_match
             plate_format = self._infer_plate_format(text, color_info.name)
 
             # Для CV-кандидатов применяем доп. фильтр: минимальная длина и OCR-confidence.
@@ -540,7 +662,53 @@ class ALPRPipeline:
     def _best_vote_text(self, votes: dict[str, float], fallback: str) -> str:
         if not votes:
             return fallback
-        return max(votes.items(), key=lambda kv: kv[1])[0]
+        winner, winner_weight = max(votes.items(), key=lambda kv: kv[1])
+        consensus = self._charwise_vote_text(votes)
+        if consensus and consensus != winner:
+            total = sum(votes.values())
+            if total > 0 and winner_weight / total >= self.cfg.temporal_consensus_min_share:
+                return winner
+            if self._looks_like_plate_text(consensus):
+                return consensus
+        return winner
+
+    def _charwise_vote_text(self, votes: dict[str, float]) -> str:
+        if not votes:
+            return ""
+        total_weight = sum(votes.values())
+        if total_weight < self.cfg.temporal_consensus_min_weight:
+            return ""
+
+        by_len: dict[int, float] = {}
+        for text, weight in votes.items():
+            cleaned = self._cleanup_plate_text(text)
+            if cleaned:
+                by_len[len(cleaned)] = by_len.get(len(cleaned), 0.0) + weight
+        if not by_len:
+            return ""
+
+        best_len, best_len_weight = max(by_len.items(), key=lambda kv: kv[1])
+        if best_len_weight / max(total_weight, 1e-6) < 0.6:
+            return ""
+
+        chars_by_pos: list[dict[str, float]] = [dict() for _ in range(best_len)]
+        for text, weight in votes.items():
+            cleaned = self._cleanup_plate_text(text)
+            if len(cleaned) != best_len:
+                continue
+            for i, ch in enumerate(cleaned):
+                chars_by_pos[i][ch] = chars_by_pos[i].get(ch, 0.0) + weight
+
+        out = []
+        for pos_votes in chars_by_pos:
+            if not pos_votes:
+                return ""
+            ch, ch_weight = max(pos_votes.items(), key=lambda kv: kv[1])
+            if ch_weight / max(best_len_weight, 1e-6) < 0.45:
+                return ""
+            out.append(ch)
+
+        return "".join(out)
 
     def _merge_color_votes(self, prev: TrackedPlate | None, det: Detection) -> dict[str, float]:
         votes = dict(prev.color_votes) if prev is not None else {}
