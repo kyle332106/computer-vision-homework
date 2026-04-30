@@ -96,9 +96,16 @@ class PipelineConfig:
     ua_format_aware: bool = True
     min_letters_in_text: int = 2
     min_digits_in_text: int = 2
+
+    # Temporal OCR stabilization: accumulate OCR hypotheses per matched track and
+    # return the most stable string instead of the latest noisy frame result.
+    temporal_stabilization: bool = True
     track_iou_match: float = 0.30
     temporal_consensus_min_weight: float = 4.0
     temporal_consensus_min_share: float = 0.55
+    temporal_vote_decay: float = 0.92
+    temporal_max_vote_items: int = 12
+    temporal_max_missing_detections: int = 3
     ocr_tta: bool = False
     ocr_tta_min_conf: float = 0.985
     ocr_tta_small_w: int = 120
@@ -150,6 +157,7 @@ class ALPRPipeline:
         self._proposer_nn = None            # GPU plate-proposer (lesson_14 style)
         self._tracked: list[TrackedPlate] = []
         self._frame_idx = 0
+        self._next_track_id = 1
 
     @property
     def proposer_nn(self):
@@ -658,13 +666,31 @@ class ALPRPipeline:
         x1, y1, x2, y2 = bbox
         return (x1, y1, x2 - x1, y2 - y1)
 
+    def _decay_votes(self, votes: dict[str, float]) -> dict[str, float]:
+        decay = min(max(self.cfg.temporal_vote_decay, 0.0), 1.0)
+        if decay >= 0.999:
+            return dict(votes)
+        return {
+            key: value * decay
+            for key, value in votes.items()
+            if value * decay >= 0.05
+        }
+
+    def _trim_votes(self, votes: dict[str, float]) -> dict[str, float]:
+        limit = max(1, int(self.cfg.temporal_max_vote_items))
+        if len(votes) <= limit:
+            return votes
+        return dict(sorted(votes.items(), key=lambda kv: kv[1], reverse=True)[:limit])
+
     def _merge_votes(self, prev: TrackedPlate | None, det: Detection) -> dict[str, float]:
-        votes = dict(prev.text_votes) if prev is not None else {}
+        if not self.cfg.temporal_stabilization:
+            return {det.text: 1.0} if det.text else {}
+        votes = self._decay_votes(prev.text_votes) if prev is not None else {}
         weight = 1.0 + det.ocr_conf + det.conf
         weight += {"both": 0.5, "yolo": 0.2, "cv": 0.0}.get(det.source, 0.0)
         if det.text:
             votes[det.text] = votes.get(det.text, 0.0) + weight
-        return votes
+        return self._trim_votes(votes)
 
     def _best_vote_text(self, votes: dict[str, float], fallback: str) -> str:
         if not votes:
@@ -718,13 +744,13 @@ class ALPRPipeline:
         return "".join(out)
 
     def _merge_color_votes(self, prev: TrackedPlate | None, det: Detection) -> dict[str, float]:
-        votes = dict(prev.color_votes) if prev is not None else {}
+        votes = self._decay_votes(prev.color_votes) if prev is not None else {}
         if det.plate_color:
             weight = 0.5 + det.plate_color_conf
             if det.plate_color != "неизвестно":
                 weight += 0.5
             votes[det.plate_color] = votes.get(det.plate_color, 0.0) + weight
-        return votes
+        return self._trim_votes(votes)
 
     def _best_vote_color(self, votes: dict[str, float], fallback: str) -> str:
         if not votes:
@@ -734,10 +760,18 @@ class ALPRPipeline:
             return fallback
         return best_color
 
-    def _match_prev_track(self, det: Detection, prev_tracks: list[TrackedPlate]) -> TrackedPlate | None:
+    def _match_prev_track(
+        self,
+        det: Detection,
+        prev_tracks: list[TrackedPlate],
+        used_track_ids: set[int] | None = None,
+    ) -> TrackedPlate | None:
+        used_track_ids = used_track_ids or set()
         prev_match = None
         prev_iou = 0.0
         for tp in prev_tracks:
+            if tp.track_id in used_track_ids:
+                continue
             xyxy_prev = (tp.bbox[0], tp.bbox[1], tp.bbox[0] + tp.bbox[2], tp.bbox[1] + tp.bbox[3])
             cur_iou = self._iou(det.bbox, xyxy_prev)
             if cur_iou > prev_iou and cur_iou >= self.cfg.track_iou_match:
@@ -752,14 +786,20 @@ class ALPRPipeline:
         frame_rgb: np.ndarray | None = None,
     ) -> list[TrackedPlate]:
         new_tracks: list[TrackedPlate] = []
+        used_track_ids: set[int] = set()
         for det in detections:
             x1, y1, x2, y2 = det.bbox
             bbox_xywh = (x1, y1, x2 - x1, y2 - y1)
-            prev_match = self._match_prev_track(det, prev_tracks)
+            prev_match = self._match_prev_track(det, prev_tracks, used_track_ids)
+            if prev_match is not None:
+                used_track_ids.add(prev_match.track_id)
             text_votes = self._merge_votes(prev_match, det)
             color_votes = self._merge_color_votes(prev_match, det)
             det.text = self._best_vote_text(text_votes, det.text)
             det.plate_color = self._best_vote_color(color_votes, det.plate_color)
+            track_id = prev_match.track_id if prev_match is not None else self._next_track_id
+            if prev_match is None:
+                self._next_track_id += 1
 
             tracker = None
             if frame_rgb is not None and self.cfg.use_tracker:
@@ -768,12 +808,25 @@ class ALPRPipeline:
 
             new_tracks.append(TrackedPlate(
                 bbox=bbox_xywh,
+                track_id=track_id,
                 text=det.text,
                 plate_color=det.plate_color,
                 tracker=tracker,
                 text_votes=text_votes,
                 color_votes=color_votes,
+                age=(prev_match.age + 1) if prev_match is not None else 1,
             ))
+        for tp in prev_tracks:
+            if tp.track_id in used_track_ids:
+                continue
+            missing_frames = tp.missing_frames + 1
+            if missing_frames > self.cfg.temporal_max_missing_detections:
+                continue
+            tp.missing_frames = missing_frames
+            tp.last_detect_age += 1
+            tp.text_votes = self._decay_votes(tp.text_votes)
+            tp.color_votes = self._decay_votes(tp.color_votes)
+            new_tracks.append(tp)
         return new_tracks
 
     def _dedupe_detections(self, detections: list[Detection]) -> list[Detection]:
@@ -828,6 +881,8 @@ class ALPRPipeline:
         results: list[Detection] = []
         still_alive: list[TrackedPlate] = []
         for tp in self._tracked:
+            if tp.tracker is None:
+                continue
             ok, bbox = tp.tracker.update(frame_rgb)
             if not ok:
                 continue
@@ -851,6 +906,7 @@ class ALPRPipeline:
     def reset(self) -> None:
         self._tracked = []
         self._frame_idx = 0
+        self._next_track_id = 1
 
 
 # ---------------------------------------------------------------------------

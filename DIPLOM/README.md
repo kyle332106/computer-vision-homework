@@ -504,13 +504,13 @@ Scene-specific fine-tune:
 - восстановление качества plate crop
 - CRNN+CTC OCR
 - scene-specific fine-tune
+- temporal OCR stabilization: weighted voting по треку + char-wise consensus
 
 Это соответствует задачам курса: применить classical CV и DL-компоненты в
 одной рабочей системе и оценить их вклад на реальных данных.
 
 ## Future Work
 
-- temporal stabilization / voting even without OpenCV tracker
 - отдельный OCR fine-tune на дальних plate crops
 - beam search decoding вместо greedy CTC
 - lightweight tracking для роста FPS

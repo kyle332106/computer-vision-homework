@@ -41,6 +41,7 @@ def has_tracker(kind: str = "csrt") -> bool:
 @dataclass
 class TrackedPlate:
     bbox: tuple[int, int, int, int]      # (x, y, w, h)
+    track_id: int = 0
     text: str = ""
     plate_color: str = "неизвестно"
     tracker: cv2.Tracker | None = None
@@ -48,6 +49,7 @@ class TrackedPlate:
     color_votes: dict[str, float] = field(default_factory=dict)
     age: int = 0                         # сколько кадров уже трекается
     last_detect_age: int = 0             # сколько кадров назад был последний YOLO-detect
+    missing_frames: int = 0              # сколько detect-шагов трек не матчился
 
 
 @dataclass

@@ -88,6 +88,15 @@ st.sidebar.subheader("Трекинг (ДЗ10)")
 use_tracker = st.sidebar.checkbox("Использовать трекер между детекциями", value=True)
 tracker_kind = st.sidebar.radio("Тип трекера", ["csrt", "kcf"], index=0)
 detect_every_n = st.sidebar.slider("YOLO раз в N кадров", 1, 15, 5)
+temporal_stabilization = st.sidebar.checkbox(
+    "Стабилизировать OCR по времени",
+    value=True,
+    help="Копит OCR-гипотезы одного трека и выбирает устойчивую строку через weighted/char-wise voting.",
+)
+temporal_max_missing = st.sidebar.slider(
+    "Память трека без детекции, detect-шагов",
+    0, 8, 3,
+)
 
 
 @st.cache_resource
@@ -97,7 +106,7 @@ def load_pipeline(
     use_classical: bool, cls_backend: str, cls_min_ocr: float,
     use_gw: bool, use_clahe_: bool, use_gamma: bool, use_sharp: bool,
     use_denoise_: bool, use_rect: bool, use_otsu: bool,
-    use_trk: bool, tk: str, n: int,
+    use_trk: bool, tk: str, n: int, temporal: bool, max_missing: int,
 ) -> ALPRPipeline:
     cfg = PipelineConfig(
         conf=conf, imgsz=imgsz,
@@ -109,6 +118,8 @@ def load_pipeline(
         use_unsharp=use_sharp, use_denoise=use_denoise_,
         use_rectify=use_rect, use_otsu=use_otsu,
         use_tracker=use_trk, tracker_kind=tk, detect_every_n=n,
+        temporal_stabilization=temporal,
+        temporal_max_missing_detections=max_missing,
     )
     return ALPRPipeline(cfg)
 
@@ -119,6 +130,7 @@ pipeline = load_pipeline(
     use_gray_world, use_clahe, use_auto_gamma, use_unsharp,
     use_denoise, use_rectify, use_otsu,
     use_tracker, tracker_kind, detect_every_n,
+    temporal_stabilization, temporal_max_missing,
 )
 pipeline.cfg.conf = conf
 pipeline.cfg.imgsz = imgsz
@@ -140,6 +152,8 @@ pipeline.cfg.use_otsu = use_otsu
 pipeline.cfg.use_tracker = use_tracker
 pipeline.cfg.tracker_kind = tracker_kind
 pipeline.cfg.detect_every_n = detect_every_n
+pipeline.cfg.temporal_stabilization = temporal_stabilization
+pipeline.cfg.temporal_max_missing_detections = temporal_max_missing
 
 
 # ---------------------------------------------------------------------------
