@@ -1,0 +1,95 @@
+{
+  "synthetic_val": {
+    "overall": {
+      "n": 2000,
+      "mean_CER": 0.0357,
+      "exact_pct": 83.5
+    },
+    "by_kind": {
+      "spec": {
+        "n": 140,
+        "mean_CER": 0.0051,
+        "exact_pct": 97.14
+      },
+      "standard": {
+        "n": 715,
+        "mean_CER": 0.001,
+        "exact_pct": 99.16
+      },
+      "foreign": {
+        "n": 289,
+        "mean_CER": 0.0067,
+        "exact_pct": 96.54
+      },
+      "diplomat": {
+        "n": 145,
+        "mean_CER": 0.0034,
+        "exact_pct": 97.24
+      },
+      "named": {
+        "n": 505,
+        "mean_CER": 0.1819,
+        "exact_pct": 39.6
+      },
+      "military": {
+        "n": 106,
+        "mean_CER": 0.0013,
+        "exact_pct": 99.06
+      },
+      "taxi": {
+        "n": 100,
+        "mean_CER": 0.0,
+        "exact_pct": 100.0
+      }
+    }
+  },
+  "real_val": {
+    "overall": {
+      "n": 136,
+      "mean_CER": 0.2366,
+      "exact_pct": 47.79
+    },
+    "by_kind": {
+      "eu-ua-2015": {
+        "n": 60,
+        "mean_CER": 0.3104,
+        "exact_pct": 26.67
+      },
+      "eu": {
+        "n": 4,
+        "mean_CER": 0.8966,
+        "exact_pct": 0.0
+      },
+      "su": {
+        "n": 13,
+        "mean_CER": 0.2747,
+        "exact_pct": 46.15
+      },
+      "unknown": {
+        "n": 41,
+        "mean_CER": 0.0762,
+        "exact_pct": 85.37
+      },
+      "eu-ua-2004": {
+        "n": 11,
+        "mean_CER": 0.1149,
+        "exact_pct": 54.55
+      },
+      "eu-ua-1995": {
+        "n": 2,
+        "mean_CER": 0.6429,
+        "exact_pct": 0.0
+      },
+      "eu_ua_2004": {
+        "n": 1,
+        "mean_CER": 0.125,
+        "exact_pct": 0.0
+      },
+      "xx-unknown": {
+        "n": 4,
+        "mean_CER": 0.25,
+        "exact_pct": 50.0
+      }
+    }
+  }
+}
